@@ -27,6 +27,8 @@ let current_version = "00000001"
 
 module Stats = Index.Stats
 
+module Raw = Raw_mmap (* or Raw, to work with plain fds *)
+
 module IO : Index.Platform.IO = struct
   let ( ++ ) = Int63.add
   let ( -- ) = Int63.sub
@@ -34,7 +36,7 @@ module IO : Index.Platform.IO = struct
   type t = {
     mutable file : string;
     mutable header : int63;
-    mutable raw : Raw.t;
+    mutable raw : Raw_mmap.t;
     mutable offset : int63;
     mutable flushed : int63;
     mutable fan_size : int63;
@@ -147,7 +149,8 @@ module IO : Index.Platform.IO = struct
 
   let raw_file ~flags ~version ~offset ~generation file =
     let x = Unix.openfile file flags 0o644 in
-    let raw = Raw.v x in
+    let raw = Raw.v ~readonly:false x in 
+    (* NOTE the assumption is that readonly is false, except for v_readonly function *)
     let header = { Raw.Header.offset; version; generation } in
     Log.debug (fun m ->
         m "[%s] raw set_header %a" file Header.pp { offset; generation });
@@ -210,13 +213,13 @@ module IO : Index.Platform.IO = struct
     match Sys.file_exists file with
     | false ->
         let x = Unix.openfile file Unix.[ O_CREAT; O_CLOEXEC; O_RDWR ] 0o644 in
-        let raw = Raw.v x in
+        let raw = Raw.v ~readonly:false x in
         Raw.Header.set raw header;
         Raw.Fan.set_size raw fan_size;
         v ~fan_size ~offset:Int63.zero raw
     | true ->
         let x = Unix.openfile file Unix.[ O_EXCL; O_CLOEXEC; O_RDWR ] 0o644 in
-        let raw = Raw.v x in
+        let raw = Raw.v ~readonly:false x in
         if fresh then (
           Raw.Header.set raw header;
           Raw.Fan.set_size raw fan_size;
@@ -233,11 +236,12 @@ module IO : Index.Platform.IO = struct
           v ~fan_size ~offset raw
 
   let v_readonly file =
-    let v = v_instance ~readonly:true file in
+    let readonly=true in 
+    let v = v_instance ~readonly file in
     mkdir (Filename.dirname file);
     try
       let x = Unix.openfile file Unix.[ O_EXCL; O_CLOEXEC; O_RDONLY ] 0o644 in
-      let raw = Raw.v x in
+      let raw = Raw.v ~readonly x in
       try
         let version = Raw.Version.get raw in
         if version <> current_version then
