@@ -3,42 +3,21 @@ module Stats = Index.Stats
 
 let ( ++ ) = Int63.add
 
-module BA = Stdlib.Bigarray (* FIXME Bigarray in scope not the same as Stdlib.Bigarray? *)
+type t = Mmap.t
 
-type buffer = (char, BA.int8_unsigned_elt, BA.c_layout) BA.Array1.t 
+(* NOTE we assume readonly is false... FIXME what should we do here? *)
+let v ~readonly:_ fd = Mmap.of_fd fd
 
-type string = Stdlib.String.t
-
-(*
-type buffer 
-=
-    (char, Bigarray_compat.int8_unsigned_elt, Bigarray_compat.c_layout)
-    Bigarray_compat.Array1.t
-*)
-
-type t = { xfd : Unix.file_descr; buf:buffer }
-
-let mapsize = 40_960_000_000L
-
-let v ~readonly fd = 
-  try
-    let shared = not readonly in
-    Unix.map_file fd Bigarray.Char Bigarray.c_layout shared [| Int64.to_int mapsize |]
-    |> Bigarray.array1_of_genarray |> fun buf -> 
-    { xfd=fd; buf }
-  with Unix.Unix_error (_e,_,_) -> 
-    failwith __LOC__
-
-let fsync t = Unix.fsync t.xfd
-let close t = Unix.close t.xfd
-let fstat t = Unix.fstat t.xfd
+let fsync t = Mmap.fsync t
+let close t = Mmap.close t
+let fstat t = Mmap.fstat t
 
 let unsafe_write t ~(off:int63) (buffer:string) buffer_offset length =
-  Bigstringaf.blit_from_string buffer ~src_off:buffer_offset t.buf ~dst_off:(Int63.to_int off) ~len:length;
+  Mmap.unsafe_write t ~src:buffer ~src_off:buffer_offset ~dst_off:(Int63.to_int off) ~len:length;
   Stats.add_write length
 
 let unsafe_read t ~(off:int63) ~len (buf:bytes) =
-  Bigstringaf.blit_to_bytes t.buf ~src_off:(Int63.to_int off) buf ~dst_off:0 ~len;
+  Mmap.unsafe_read t ~src_off:(Int63.to_int off) ~len ~buf;
   Stats.add_read len;
   len
 
