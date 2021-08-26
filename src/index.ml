@@ -375,7 +375,7 @@ struct
 
   (** {1 Find and Mem}*)
 
-  module IOArray = Io_array.Make (IO) (Entry)
+  module IOArray = Io_array.Make_noop (IO) (Entry)
 
   module Search =
     Search.Make (Entry) (IOArray)

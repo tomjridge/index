@@ -126,3 +126,33 @@ module Make (IO : Io.S) (Elt : ELT) :
                 Int63.pp high);
           set_buffer t ~low ~high
 end
+
+(** Make a no-op implementation, for use with mmap *)
+module Make_noop (IO : Io.S) (Elt : ELT) :
+  S with type io = IO.t and type elt = Elt.t = struct
+  module Elt = struct
+    include Elt
+
+    let encoded_sizeL = Int63.of_int encoded_size
+  end
+
+  type io = IO.t
+  type elt = Elt.t
+  type t = { io : IO.t }
+
+  let v io = { io }
+
+  let get_entry_from_io io off =
+    let buf = Bytes.create Elt.encoded_size in
+    let n = IO.read io ~off ~len:Elt.encoded_size buf in
+    assert (n = Elt.encoded_size);
+    Elt.decode (Bytes.unsafe_to_string buf) 0
+
+  let get t i =
+    let off = Int63.(i * Elt.encoded_sizeL) in
+    get_entry_from_io t.io off
+
+  let length t = Int63.div (IO.offset t.io) Elt.encoded_sizeL
+
+  let pre_fetch _t ~low:_ ~high:_ = ()
+end
