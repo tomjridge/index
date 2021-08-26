@@ -38,12 +38,16 @@ module Make_1(S:S) = struct
     in
     buf
 
-  let remap sz t =     
+  let remap sz t = 
+    (* release old buffer *)
+    t.buf <- Bigstringaf.create 0;
+    (* force collection of old buffer; perhaps try to detect
+       finalization *)
+    Gc.full_major ();
+    (* create new map *)
     let buf = map t.fd sz in
     t.buf <- buf 
-  (* NOTE the old t.buf should be GC'ed at some point *)        
-
-  
+    
   (* NOTE public functions from here *)
   
   (* FIXME shared is always true? if we are unmapping and remapping,
