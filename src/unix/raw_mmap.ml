@@ -3,21 +3,23 @@ module Stats = Index.Stats
 
 let ( ++ ) = Int63.add
 
-type t = Mmap.t
+module Mmap_ = Mmap.With_string
+
+type t = Mmap_.t
 
 (* NOTE we assume readonly is false... FIXME what should we do here? *)
-let v ~readonly:_ fd = Mmap.of_fd fd
+let v ~readonly:_ fd = Mmap_.of_fd fd
 
-let fsync t = Mmap.fsync t
-let close t = Mmap.close t
-let fstat t = Mmap.fstat t
+let fsync t = Mmap_.fsync t
+let close t = Mmap_.close t
+let fstat t = Mmap_.fstat t
 
 let unsafe_write t ~(off:int63) (buffer:string) buffer_offset length =
-  Mmap.unsafe_write t ~src:buffer ~src_off:buffer_offset ~dst_off:(Int63.to_int off) ~len:length;
+  Mmap_.unsafe_write t ~src:buffer ~src_off:buffer_offset ~dst_off:(Int63.to_int off) ~len:length;
   Stats.add_write length
 
 let unsafe_read t ~(off:int63) ~len (buf:bytes) =
-  Mmap.unsafe_read t ~src_off:(Int63.to_int off) ~len ~buf;
+  Mmap_.unsafe_read t ~src_off:(Int63.to_int off) ~len ~buf;
   Stats.add_read len;
   len
 

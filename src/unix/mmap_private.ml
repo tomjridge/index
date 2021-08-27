@@ -24,6 +24,7 @@ module type S = sig
   val mmap_increment_size: int 
 end
 
+(** Version with src_buf=string, dst_buf=bytes *)
 module Make_1(S:S) = struct
   open S
   let _ = assert(int_size_is_geq_63 && Sys.int_size >= 63)
@@ -56,7 +57,6 @@ module Make_1(S:S) = struct
     let sz = (Unix.fstat fd).st_size in
     let buf = map fd (sz+mmap_increment_size) in
     { fd; buf; min_not_written=sz }
-
 
   let unsafe_write t ~(src:string) ~src_off ~dst_off ~len =
     begin 
@@ -92,5 +92,45 @@ module Make_1(S:S) = struct
     Unix.close t.fd
 end
 
-module Make_2(S:S) : Mmap_intf.S = Make_1(S)
-  
+module Make_2(S:S) : Mmap_intf.S_STRING = Make_1(S)
+
+(** Version with src_buf=dst_buf=bigstring *)  
+module Make_3(S:S) = struct
+
+  module Buf = Bigstringaf 
+  type buf = Buf.t
+
+  open S
+  let _ = assert(int_size_is_geq_63 && Sys.int_size >= 63)
+
+  type nonrec t = t
+
+  module M = Make_1(S)
+
+  let map,remap,of_fd = M.(map,remap,of_fd)
+
+  let unsafe_write t ~(src:buf) ~src_off ~dst_off ~len =
+    begin 
+      match dst_off+len > Array1.dim t.buf with
+      | true -> remap (dst_off+len+mmap_increment_size) t
+      | false -> ()
+    end;    
+    Bigstringaf.blit src ~src_off t.buf ~dst_off ~len;
+    t.min_not_written <- max t.min_not_written (dst_off+len);
+    ()
+
+  let unsafe_read t ~src_off ~len ~(buf:buf) = 
+    assert(Buf.length buf >= len);
+    begin 
+      match src_off+len > Array1.dim t.buf with
+      | true -> remap (src_off+len+mmap_increment_size) t
+      | false -> ()
+    end;    
+    Bigstringaf.blit t.buf ~src_off buf ~dst_off:0 ~len;
+    ()    
+
+  let fsync,fstat,close = M.(fsync,fstat,close)
+
+end
+
+module Make_4(S:S) : Mmap_intf.S_BIGSTRING = Make_3(S)
