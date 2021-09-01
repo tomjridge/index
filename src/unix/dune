@@ -4,5 +4,6 @@
   (names pread pwrite))
  (public_name index.unix)
  (name index_unix)
+ (foreign_stubs (language c) (names caml_msync)) ; NOTE taken from plebeia
  (libraries fmt index logs logs.threaded threads.posix unix semaphore-compat
    mtime mtime.clock.os optint bigarray-compat bigstringaf))

@@ -79,8 +79,11 @@ module Make_1(S:S) = struct
     ()    
 
   (* FIXME need to use msync, not fsync *)
-  let fsync t = Unix.fsync t.fd
+  let fsync t = 
+    Msync.msync (t.buf |> Bigarray.genarray_of_array1);
+    Unix.fsync t.fd
       
+  (* FIXME return actual size of written part? *)
   let fstat t = Unix.fstat t.fd
 
   (* FIXME need to use munmap *)
