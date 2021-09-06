@@ -19,6 +19,9 @@
 
 (** Version of index using SQLite for the backend data store. *)
 
+module Kv = Kv_lite.Direct_impl
+
+
 include Index_intf
 open! Import
 
@@ -106,8 +109,8 @@ struct
             index's flushes with the flushes of larger systems. *)
   }
 
-  type index = {
-    something_else: unit;
+  type index = Kv.t 
+
 (*
     io : IO.t;  (** The disk file handler. *)
     fan_out : [ `Read ] Fan.t;
@@ -115,7 +118,7 @@ struct
             constant time. This is an in-memory object, also encoded in the
             header of [io]. *)
 *)
-  }
+
 
   type log = {
     io : IO.t;  (** The disk file handler. *)
@@ -185,6 +188,7 @@ struct
           (fun (l : log) ->
             IO.clear ~generation:t.generation ~reopen:false l.io)
           t.log_async;
+        ignore(failwith "Add clear operation to index_lite?");
         (* FIXME Option.iter
           (fun (i : index) ->
             IO.clear ~generation:t.generation ~reopen:false i.io)
@@ -305,21 +309,20 @@ struct
           sync_log_entries log)
 
   (** Syncs the [index] of the instance by checking on-disk changes. *)
-  let sync_index t =
+  let sync_index (t:instance) =
     (* Close the file handler to be able to reload it, as the file may have
        changed after a merge. *)
-    (* FIXME Option.iter (fun (i : index) -> IO.close i.io) t.index; *)
+    Option.iter (fun i -> Kv.close i) t.index;
     let index_path = Layout.data ~root:t.root in
     match IO.v_readonly index_path with
     | Error `No_file_on_disk -> t.index <- None
     | Ok _io ->
-      (* FIXME 
-        let fan_out = Fan.import ~hash_size:K.hash_size (IO.get_fanout io) in
-        (* We maintain that [index] is [None] if the file is empty. *)
-        if IO.offset io = Int63.zero then t.index <- None
-        else t.index <- Some { fan_out; io }
-      *)
-      ()
+      Kv.open_ ~fn:index_path |> function
+      | Ok i ->  t.index <- Some i
+      | Error e -> 
+        (* FIXME presumably we should raise an error *)
+        t.index <- None;
+        ()
 
   (** Syncs an instance entirely, by checking on-disk changes for [log], [sync],
       and [log_async]. *)
@@ -444,7 +447,12 @@ struct
       find_if_exists ~name:"log" ~find:(fun log -> Tbl.find log.mem) t.log
     in
     let find_index () =
-      (* FIXME find_if_exists ~name:"index" ~find:interpolation_search t.index *) raise Not_found
+      (* FIXME find_if_exists is a bit strange *)
+      find_if_exists ~name:"log_index"
+        ~find:(fun index key -> Kv.find_opt index (K.encode key) |> function
+          | Some v -> V.decode v 0
+          | None -> raise Not_found) 
+        t.index
     in
     Semaphore.with_acquire "find_instance" t.rename_lock @@ fun () ->
     match find_log_async () with
@@ -550,8 +558,16 @@ struct
           transfer_log_async_to_log ~root ~generation ~log ~log_async:io
     in
     (* load the [data] file *)
-    let index = None
-(* FIXME
+    let index = 
+      let index_path = Layout.data ~root in
+      Kv.open_ ~fn:index_path |> function
+      | Ok i -> Some i
+      | Error e -> 
+        (* FIXME what to do? *)
+        ignore(failwith e);
+        None
+    in
+(* FIXME; FIXME why None when readonly?
       if readonly then None
       else
         let index_path = Layout.data ~root in
@@ -578,7 +594,6 @@ struct
               l "[%s] no index file detected." (Filename.basename root));
           None)
 *)
-    in
     {
       config;
       generation;
