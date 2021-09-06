@@ -109,7 +109,34 @@ struct
             index's flushes with the flushes of larger systems. *)
   }
 
-  type index = Kv.t 
+  (* The rw connection is for the merge thread; the ro connection is
+     for the readonly threads, and normal operation; FIXME at the
+     moment we just lock both connections with the same lock, but for
+     performance we want to allow separate locks *)
+  type index = { rw: Kv.t; ro:Kv.t; lock:Semaphore.t;  }
+               
+  let with_index t f = 
+    Semaphore.with_acquire 
+      "with_index" 
+      t.lock
+      (fun () -> 
+         f ~rw:t.rw ~ro:t.ro)
+
+  (* FIXME error cases *)
+  let open_index index_path = 
+    Kv.open_ ~fn:index_path |> function
+    | Ok rw -> (
+        Kv.open_ ~fn:index_path |> function
+        | Ok ro -> { rw; ro; lock=Semaphore.make true } (* true means the sem is free initially *)
+        | Error e -> failwith e)
+    | Error e -> failwith e
+
+  let close_index t = 
+    with_index t (fun ~rw ~ro -> 
+        Kv.close rw;
+        Kv.close ro;
+        ())
+    
 
 (*
     io : IO.t;  (** The disk file handler. *)
@@ -186,13 +213,10 @@ struct
         Tbl.clear log.mem;
         Option.iter
           (fun (l : log) ->
-            IO.clear ~generation:t.generation ~reopen:false l.io)
+             IO.clear ~generation:t.generation ~reopen:false l.io)
           t.log_async;
-        ignore(failwith "Add clear operation to index_lite?");
-        (* FIXME Option.iter
-          (fun (i : index) ->
-            IO.clear ~generation:t.generation ~reopen:false i.io)
-          t.index; *)
+        (* ignore(failwith "Add clear operation to index_lite?"); *)
+        Option.iter (fun (i : index) -> Kv.clear i.rw) t.index;
         t.index <- None;
         t.log_async <- None)
 
@@ -308,22 +332,18 @@ struct
                 Int63.pp h.generation);
           sync_log_entries log)
 
+
   (** Syncs the [index] of the instance by checking on-disk changes. *)
   let sync_index (t:instance) =
     (* Close the file handler to be able to reload it, as the file may have
        changed after a merge. *)
-    Option.iter (fun i -> Kv.close i) t.index;
+    Option.iter (fun i -> with_index i (fun ~rw ~ro -> (Kv.close rw; Kv.close ro))) t.index;
     let index_path = Layout.data ~root:t.root in
     match IO.v_readonly index_path with
     | Error `No_file_on_disk -> t.index <- None
     | Ok _io ->
-      Kv.open_ ~fn:index_path |> function
-      | Ok i ->  t.index <- Some i
-      | Error e -> 
-        (* FIXME presumably we should raise an error *)
-        ignore(failwith e);
-        t.index <- None;
-        ()
+      open_index index_path |> function i -> 
+        t.index <- Some i
 
   (** Syncs an instance entirely, by checking on-disk changes for [log], [sync],
       and [log_async]. *)
@@ -450,9 +470,11 @@ struct
     let find_index () =
       (* FIXME find_if_exists is a bit strange *)
       find_if_exists ~name:"log_index"
-        ~find:(fun index key -> Kv.find_opt index (K.encode key) |> function
-          | Some v -> V.decode v 0
-          | None -> raise Not_found) 
+        ~find:(fun index key -> 
+            with_index index (fun ~rw:_ ~ro -> 
+                Kv.find_opt ro (K.encode key) |> function
+                | Some v -> V.decode v 0
+                | None -> raise Not_found)) 
         t.index
     in
     Semaphore.with_acquire "find_instance" t.rename_lock @@ fun () ->
@@ -561,12 +583,7 @@ struct
     (* load the [data] file *)
     let index = 
       let index_path = Layout.data ~root in
-      Kv.open_ ~fn:index_path |> function
-      | Ok i -> Some i
-      | Error e -> 
-        (* FIXME what to do? *)
-        ignore(failwith e);
-        None
+      Some (open_index index_path)
     in
 (* FIXME; FIXME why None when readonly?
       if readonly then None
@@ -761,6 +778,9 @@ struct
       incr n;
       !n
 
+
+  let trace s = Printf.printf "%s\n%!" s
+
   (** Merges the entries in [t.log] into the data file, ensuring that concurrent
       writes are not lost.
 
@@ -771,19 +791,23 @@ struct
       - [t.merge_lock] is acquired before entry, and released immediately after
         this function returns or raises an exception. *)
   let unsafe_perform_merge  ~(witness:unit) ~filter ~hook t =
+    trace "unsafe_perform_merge 1";
     ignore(witness); (* FIXME not needed? *)
     ignore(filter); (* FIXME not implemented at this point *)
     hook `Before;
     let log = Option.get t.log in
     let generation = Int63.succ t.generation in
     (* get the entries to merge *)
+    trace "unsafe_perform_merge 2";
     log.mem |> Tbl.to_seq |> List.of_seq |> fun kvs -> 
-    let ops = List.map (fun (k,v) -> (K.encode k, `Insert(V.encode v))) kvs in
+    trace "unsafe_perform_merge 3";
+    let ops = List.rev_map (fun (k,v) -> (K.encode k, `Insert(V.encode v))) kvs in
+    trace "unsafe_perform_merge 4";
     Printf.printf "Merging %d entries\n%!" (List.length ops);
     (* FIXME check this isn't too long... maybe perform in batches *)
     assert(t.index <> None); (* FIXME *)
     let index = Option.get t.index in
-    Kv.batch index ops;
+    with_index index (fun ~rw ~ro:_ -> Kv.batch rw ops);
     (* NOTE following copied from previous code, without much
        understanding FIXME *)
     let before_rename_lock = Clock.counter () in
@@ -1176,7 +1200,7 @@ struct
                   Tbl.clear l.mem;
                   IO.close l.io)
                 t.log;
-              Option.iter (fun (i : index) -> Kv.close i) t.index;
+              Option.iter (fun (i : index) -> close_index i) t.index;
               Option.iter (fun lock -> IO.Lock.unlock lock) t.writer_lock))
 
   let close ?immediately = close' ~immediately ~hook:(fun _ -> ())
