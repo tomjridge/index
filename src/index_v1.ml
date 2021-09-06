@@ -15,13 +15,6 @@
    The above copyright notice and this permission notice shall be included in
    all copies or substantial portions of the Software. *)
 
-[@@@warning "-27-32"](* FIXME remove *)
-
-(** Version of index using SQLite for the backend data store. *)
-
-module Kv = Kv_lite.Direct_impl
-
-
 include Index_intf
 open! Import
 
@@ -109,16 +102,13 @@ struct
             index's flushes with the flushes of larger systems. *)
   }
 
-  type index = Kv.t 
-
-(*
+  type index = {
     io : IO.t;  (** The disk file handler. *)
     fan_out : [ `Read ] Fan.t;
         (** The fan-out, used to map keys to small intervals in the file, in
             constant time. This is an in-memory object, also encoded in the
             header of [io]. *)
-*)
-
+  }
 
   type log = {
     io : IO.t;  (** The disk file handler. *)
@@ -188,11 +178,10 @@ struct
           (fun (l : log) ->
             IO.clear ~generation:t.generation ~reopen:false l.io)
           t.log_async;
-        ignore(failwith "Add clear operation to index_lite?");
-        (* FIXME Option.iter
+        Option.iter
           (fun (i : index) ->
             IO.clear ~generation:t.generation ~reopen:false i.io)
-          t.index; *)
+          t.index;
         t.index <- None;
         t.log_async <- None)
 
@@ -309,21 +298,18 @@ struct
           sync_log_entries log)
 
   (** Syncs the [index] of the instance by checking on-disk changes. *)
-  let sync_index (t:instance) =
+  let sync_index t =
     (* Close the file handler to be able to reload it, as the file may have
        changed after a merge. *)
-    Option.iter (fun i -> Kv.close i) t.index;
+    Option.iter (fun (i : index) -> IO.close i.io) t.index;
     let index_path = Layout.data ~root:t.root in
     match IO.v_readonly index_path with
     | Error `No_file_on_disk -> t.index <- None
-    | Ok _io ->
-      Kv.open_ ~fn:index_path |> function
-      | Ok i ->  t.index <- Some i
-      | Error e -> 
-        (* FIXME presumably we should raise an error *)
-        ignore(failwith e);
-        t.index <- None;
-        ()
+    | Ok io ->
+        let fan_out = Fan.import ~hash_size:K.hash_size (IO.get_fanout io) in
+        (* We maintain that [index] is [None] if the file is empty. *)
+        if IO.offset io = Int63.zero then t.index <- None
+        else t.index <- Some { fan_out; io }
 
   (** Syncs an instance entirely, by checking on-disk changes for [log], [sync],
       and [log_async]. *)
@@ -391,7 +377,6 @@ struct
 
   module IOArray = Io_array.Make (IO) (Entry)
 
-(*
   module Search =
     Search.Make (Entry) (IOArray)
       (struct
@@ -425,7 +410,6 @@ struct
       Int63.(div low_bytes entry_sizeL, div high_bytes entry_sizeL)
     in
     Search.interpolation_search (IOArray.v index.io) key ~low ~high
-*)
 
   (** Finds the value associated to [key] in [t]. In order, checks in
       [log_async] (in memory), then [log] (in memory), then [index] (on disk). *)
@@ -448,12 +432,7 @@ struct
       find_if_exists ~name:"log" ~find:(fun log -> Tbl.find log.mem) t.log
     in
     let find_index () =
-      (* FIXME find_if_exists is a bit strange *)
-      find_if_exists ~name:"log_index"
-        ~find:(fun index key -> Kv.find_opt index (K.encode key) |> function
-          | Some v -> V.decode v 0
-          | None -> raise Not_found) 
-        t.index
+      find_if_exists ~name:"index" ~find:interpolation_search t.index
     in
     Semaphore.with_acquire "find_instance" t.rename_lock @@ fun () ->
     match find_log_async () with
@@ -559,16 +538,7 @@ struct
           transfer_log_async_to_log ~root ~generation ~log ~log_async:io
     in
     (* load the [data] file *)
-    let index = 
-      let index_path = Layout.data ~root in
-      Kv.open_ ~fn:index_path |> function
-      | Ok i -> Some i
-      | Error e -> 
-        (* FIXME what to do? *)
-        ignore(failwith e);
-        None
-    in
-(* FIXME; FIXME why None when readonly?
+    let index =
       if readonly then None
       else
         let index_path = Layout.data ~root in
@@ -594,7 +564,7 @@ struct
           Log.debug (fun l ->
               l "[%s] no index file detected." (Filename.basename root));
           None)
-*)
+    in
     {
       config;
       generation;
@@ -653,7 +623,6 @@ struct
 
   (** {1 Merges} *)
 
-(*
   (** Appends the entry encoded in [buf] into [dst_io] and registers it in
       [fan_out] with hash [hash]. *)
   let append_substring_fanout fan_out hash dst_io buf ~off ~len =
@@ -684,9 +653,7 @@ struct
     for log_i = log_i to Array.length log - 1 do
       append_entry_fanout fan_out log.(log_i) dst_io
     done
-*)
 
-(*
   (** Merges [log] with [index] into [dst_io], ignoring bindings that do not
       satisfy [filter (k, v)]. [log] must be sorted by key hashes. *)
   let merge_with ~hook ~yield ~filter log index_io fan_out dst_io =
@@ -752,7 +719,6 @@ struct
             (go [@tailcall]) false index_offset buf_offset log_i
     in
     (go [@tailcall]) true Int63.zero 0 0
-*)
 
   (** Increases and returns the merge counter. *)
   let merge_counter =
@@ -770,59 +736,7 @@ struct
       - [t.log_async] has been created;
       - [t.merge_lock] is acquired before entry, and released immediately after
         this function returns or raises an exception. *)
-  let unsafe_perform_merge  ~(witness:unit) ~filter ~hook t =
-    ignore(witness); (* FIXME not needed? *)
-    ignore(filter); (* FIXME not implemented at this point *)
-    hook `Before;
-    let log = Option.get t.log in
-    let generation = Int63.succ t.generation in
-    (* get the entries to merge *)
-    log.mem |> Tbl.to_seq |> List.of_seq |> fun kvs -> 
-    let ops = List.map (fun (k,v) -> (K.encode k, `Insert(V.encode v))) kvs in
-    Printf.printf "Merging %d entries\n%!" (List.length ops);
-    (* FIXME check this isn't too long... maybe perform in batches *)
-    assert(t.index <> None); (* FIXME *)
-    let index = Option.get t.index in
-    Kv.batch index ops;
-    (* NOTE following copied from previous code, without much
-       understanding FIXME *)
-    let before_rename_lock = Clock.counter () in
-    let rename_lock_duration =
-      Semaphore.with_acquire "merge-rename" t.rename_lock (fun () ->
-          let rename_lock_duration = Clock.count before_rename_lock in
-          (* IO.rename ~src:merge ~dst:index.io; *)
-          t.index <- Some index;
-          t.generation <- generation;
-          IO.clear ~generation ~reopen:true log.io;
-          Tbl.clear log.mem;
-          hook `After_clear;
-          let log_async = Option.get t.log_async in
-          let append_io = IO.append log.io in
-          Tbl.iter
-            (fun key value ->
-               Tbl.replace log.mem key value;
-               Entry.encode' key value append_io)
-            log_async.mem;
-          (* NOTE: It {i may} not be necessary to trigger the
-             [flush_callback] here. If the instance has been recently
-             flushed (or [log_async] just reached the [auto_flush_limit]),
-             we're just moving already-persisted values around. However, we
-             trigger the callback anyway for simplicity. *)
-          (* `fsync` is necessary, since bindings in `log_async` may have
-             been explicitely `fsync`ed during the merge, so we need to
-             maintain their durability. *)
-          IO.flush ~with_fsync:true log.io;
-          IO.clear ~generation:(Int63.succ generation) ~reopen:false
-            log_async.io;
-          (* log_async.mem does not need to be cleared as we are discarding
-             it. *)
-          t.log_async <- None;
-          rename_lock_duration)
-    in
-    hook `After;
-    (`Completed, rename_lock_duration)
-
-(* FIXME previous unsafe_perform_merge code
+  let unsafe_perform_merge ~witness ~filter ~hook t =
     hook `Before;
     let log = Option.get t.log in
     let generation = Int63.succ t.generation in
@@ -934,7 +848,6 @@ struct
         in
         hook `After;
         (`Completed, rename_lock_duration)
-*)
 
   let reset_log_async t =
     let io =
@@ -999,7 +912,6 @@ struct
     in
     if blocking then go () |> Thread.return else Thread.async go
 
-(*
   let get_witness t =
     match t.log with
     | None -> None
@@ -1014,30 +926,26 @@ struct
             (* If [log] is empty, get an entry in [index]. *)
             match t.index with
             | None -> None
-            | Some _index ->
-              (* FIXME 
+            | Some index ->
                 let buf = Bytes.create Entry.encoded_size in
                 let n =
                   IO.read index.io ~off:Int63.zero ~len:Entry.encoded_size buf
                 in
                 assert (n = Entry.encoded_size);
                 Some (Entry.decode (Bytes.unsafe_to_string buf) 0)))
-              *)
-              None))
-*)
 
   (** This triggers a merge if the [log] exceeds [log_size], or if the [log]
       contains entries and [force] is true *)
   let try_merge_aux ?hook ?(force = false) t =
     let t = check_open t in
-(*    let witness =
+    let witness =
       Semaphore.with_acquire "witness" t.rename_lock (fun () -> get_witness t)
     in
     match witness with
     | None ->
         Log.debug (fun l -> l "[%s] index is empty" (Filename.basename t.root));
         Thread.return `Completed
-    | Some witness -> ( *)
+    | Some witness -> (
         match t.log with
         | None ->
             Log.debug (fun l ->
@@ -1049,8 +957,8 @@ struct
               || Int63.compare (IO.offset log.io)
                    (Int63.of_int t.config.log_size)
                  > 0
-            then merge' ~force ?hook ~witness:() t
-            else Thread.return `Completed
+            then merge' ~force ?hook ~witness t
+            else Thread.return `Completed)
 
   let merge t = ignore (try_merge_aux ?hook:None ~force:true t : _ async)
   let try_merge t = ignore (try_merge_aux ?hook:None ~force:false t : _ async)
@@ -1093,7 +1001,7 @@ struct
       | `Overcommit_memory, false | `Block_writes, _ ->
           (* Start a merge, blocking if one is already running. *)
           let hook = hook |> Option.map (fun f stage -> f (`Merge stage)) in
-          Some (merge' ?hook ~witness:() (* (Entry.v key value)*) t)
+          Some (merge' ?hook ~witness:(Entry.v key value) t)
     else None
 
   let replace ?overcommit t key value =
@@ -1109,15 +1017,12 @@ struct
 
   (** {1 Filter} *)
 
-  (* FIXME filter is somewhat costly to implement on top of sqlite! *)
-
   (** [filter] is implemented with a [merge], during which bindings that do not
       satisfy the predicate are not merged. *)
   let filter t f =
     let t = check_open t in
     Log.debug (fun l -> l "[%s] filter" (Filename.basename t.root));
     if t.config.readonly then raise RO_not_allowed;
-(*
     let witness =
       Semaphore.with_acquire "witness" t.rename_lock (fun () -> get_witness t)
     in
@@ -1125,16 +1030,13 @@ struct
     | None ->
         Log.debug (fun l -> l "[%s] index is empty" (Filename.basename t.root))
     | Some witness -> (
-*)
-        match Thread.await (merge' ~blocking:true ~filter:f ~witness:() t) with
+        match Thread.await (merge' ~blocking:true ~filter:f ~witness t) with
         | Ok (`Aborted | `Completed) -> ()
         | Error (`Async_exn exn) ->
             Fmt.failwith "filter: asynchronous exception during merge (%s)"
-              (Printexc.to_string exn)
+              (Printexc.to_string exn))
 
   (** {1 Iter} *)
-
-  (* FIXME iter is somewhat costly to implement on top of sqlite *)
 
   let iter f t =
     let t = check_open t in
@@ -1143,9 +1045,9 @@ struct
     | None -> ()
     | Some log ->
         Tbl.iter f log.mem;
-        (* FIXME Option.iter
-          (fun (i : index) -> iter_io (fun e -> f e.key e.value) i.io) 
-          t.index;*)
+        Option.iter
+          (fun (i : index) -> iter_io (fun e -> f e.key e.value) i.io)
+          t.index;
         Semaphore.with_acquire "iter" t.rename_lock (fun () ->
             match t.log_async with None -> () | Some log -> Tbl.iter f log.mem)
 
@@ -1176,7 +1078,7 @@ struct
                   Tbl.clear l.mem;
                   IO.close l.io)
                 t.log;
-              Option.iter (fun (i : index) -> Kv.close i) t.index;
+              Option.iter (fun (i : index) -> IO.close i.io) t.index;
               Option.iter (fun lock -> IO.Lock.unlock lock) t.writer_lock))
 
   let close ?immediately = close' ~immediately ~hook:(fun _ -> ())
