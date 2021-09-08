@@ -115,7 +115,7 @@ struct
   (* NOTE the ro connection should never be used concurrently from the
      same process, so we don't need a lock; the rw connection is for
      the merge thread ONLY;  *)
-  type index = { rw: Kv.t; ro:Kv.t; rw_lock:Semaphore.t; }
+  type index = { rw: Kv.t; rw_lock:Semaphore.t; }
                
   let with_index_rw t f = 
     Semaphore.with_acquire 
@@ -127,17 +127,15 @@ struct
   (* FIXME error cases *)
   let open_index index_path = 
     Kv.open_ ~fn:index_path |> function
-    | Ok rw -> (
-        Kv.open_ ~fn:index_path |> function
-        | Ok ro -> { rw; ro; rw_lock=Semaphore.make true } (* true means the sem is free initially *)
-        | Error e -> failwith e)
+    | Ok rw -> 
+        { rw; rw_lock=Semaphore.make true } (* true means the sem is free initially *)
     | Error e -> failwith e
 
   (* FIXME are we sure that close is never called with a concurrent action on t.ro? *)
   let close_index t = 
     with_index_rw t (fun ~rw -> 
         Kv.close rw;
-        Kv.close t.ro;
+        (* Kv.close t.ro; *)
         ())
     
 
@@ -494,7 +492,8 @@ struct
       (* FIXME find_if_exists is a bit strange *)
       find_if_exists ~name:"log_index"
         ~find:(fun index key -> 
-            Kv.find_opt index.ro (K.encode key) |> function
+            (* FIXME this should be protected by a lock... but kyoto maybe has its own lock *)
+            Kv.find_opt index.rw (K.encode key) |> function
                 | Some v -> V.decode v 0
                 | None -> raise Not_found)
         t.index
@@ -824,14 +823,20 @@ struct
     trace "unsafe_perform_merge 2";
     log.mem |> Tbl.to_seq |> List.of_seq |> fun kvs -> 
     trace "unsafe_perform_merge 3";
-    let ops = List.rev_map (fun (k,v) -> (K.encode k, `Insert(V.encode v))) kvs in
+    (* let ops = List.rev_map (fun (k,v) -> (K.encode k, `Insert(V.encode v))) kvs in *)
     trace "unsafe_perform_merge 4";
-    Printf.printf "Merging %d entries\n%!" (List.length ops);
+    Printf.printf "Merging %d entries\n%!" (List.length kvs);
     (* FIXME check this isn't too long... maybe perform in batches *)
     assert(t.index <> None); (* FIXME *)
     let index = Option.get t.index in
     let t1 = Unix.time () in
-    with_index_rw index (fun ~rw -> Kv.batch rw ops);
+    (* with_index_rw index (fun ~rw -> Kv.batch rw ops); *)
+    let c = ref 1 in
+    with_index_rw index (fun ~rw -> 
+        kvs |> List.iter (fun (k,v) -> 
+            Kv.slow_insert rw (K.encode k) (V.encode v); 
+            incr c;
+            if (!c mod 1000 = 0) then Thread.yield () else ()));
     let t2 = Unix.time () in
     Printf.printf "Merge took %f\n%!" (t2 -. t1);
     (* NOTE following copied from previous code, without much
