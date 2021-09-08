@@ -19,8 +19,8 @@
 
 (** Version of index using SQLite for the backend data store. *)
 
-module Kv = Kv_lite.Direct_impl
-
+module Kv = Kv_lite.Kyoto_impl
+module Thread0 = Thread
 
 include Index_intf
 open! Import
@@ -110,31 +110,34 @@ struct
   }
 
   (* The rw connection is for the merge thread; the ro connection is
-     for the readonly threads, and normal operation; FIXME at the
-     moment we just lock both connections with the same lock, but for
-     performance we want to allow separate locks *)
-  type index = { rw: Kv.t; ro:Kv.t; lock:Semaphore.t;  }
+     for the readonly threads, and normal operation (eg find op) *)
+
+  (* NOTE the ro connection should never be used concurrently from the
+     same process, so we don't need a lock; the rw connection is for
+     the merge thread ONLY;  *)
+  type index = { rw: Kv.t; ro:Kv.t; rw_lock:Semaphore.t; }
                
-  let with_index t f = 
+  let with_index_rw t f = 
     Semaphore.with_acquire 
-      "with_index" 
-      t.lock
-      (fun () -> 
-         f ~rw:t.rw ~ro:t.ro)
+      "with_index_rw" 
+      t.rw_lock
+      (fun () -> f ~rw:t.rw)
+
 
   (* FIXME error cases *)
   let open_index index_path = 
     Kv.open_ ~fn:index_path |> function
     | Ok rw -> (
         Kv.open_ ~fn:index_path |> function
-        | Ok ro -> { rw; ro; lock=Semaphore.make true } (* true means the sem is free initially *)
+        | Ok ro -> { rw; ro; rw_lock=Semaphore.make true } (* true means the sem is free initially *)
         | Error e -> failwith e)
     | Error e -> failwith e
 
+  (* FIXME are we sure that close is never called with a concurrent action on t.ro? *)
   let close_index t = 
-    with_index t (fun ~rw ~ro -> 
+    with_index_rw t (fun ~rw -> 
         Kv.close rw;
-        Kv.close ro;
+        Kv.close t.ro;
         ())
     
 
@@ -196,6 +199,20 @@ struct
   let check_open t =
     match !t with Some instance -> instance | None -> raise Closed
 
+  (** {1 Check if merge in progress} *)
+
+  let instance_is_merging t =
+    (* [merge_lock] is used to detect an ongoing merge. Other operations can
+       take this lock, but as they are not async, we consider this to be a good
+       enough approximation. *)
+    Semaphore.is_held t.merge_lock
+
+  let is_merging t =
+    let t = check_open t in
+    if t.config.readonly then raise RO_not_allowed;
+    instance_is_merging t
+
+
   (** {1 Clear} *)
 
   let clear' ~hook t =
@@ -215,8 +232,8 @@ struct
           (fun (l : log) ->
              IO.clear ~generation:t.generation ~reopen:false l.io)
           t.log_async;
-        (* ignore(failwith "Add clear operation to index_lite?"); *)
         Option.iter (fun (i : index) -> Kv.clear i.rw) t.index;
+        (* FIXME t.index should be closed? or at least not set to none; FIXME find out where t.index is set/unset *)
         t.index <- None;
         t.log_async <- None)
 
@@ -337,7 +354,7 @@ struct
   let sync_index (t:instance) =
     (* Close the file handler to be able to reload it, as the file may have
        changed after a merge. *)
-    Option.iter (fun i -> with_index i (fun ~rw ~ro -> (Kv.close rw; Kv.close ro))) t.index;
+    Option.iter close_index t.index;
     let index_path = Layout.data ~root:t.root in
     match IO.v_readonly index_path with
     | Error `No_file_on_disk -> t.index <- None
@@ -447,6 +464,12 @@ struct
     Search.interpolation_search (IOArray.v index.io) key ~low ~high
 *)
 
+
+  (* NOTE we try to slow down if we are already merging *)
+  let slow_down_if_merging t = 
+    (* (if instance_is_merging t then Thread0.delay 0.000_001 else ()) *)
+    ()
+
   (** Finds the value associated to [key] in [t]. In order, checks in
       [log_async] (in memory), then [log] (in memory), then [index] (on disk). *)
   let find_instance t key =
@@ -471,12 +494,12 @@ struct
       (* FIXME find_if_exists is a bit strange *)
       find_if_exists ~name:"log_index"
         ~find:(fun index key -> 
-            with_index index (fun ~rw:_ ~ro -> 
-                Kv.find_opt ro (K.encode key) |> function
+            Kv.find_opt index.ro (K.encode key) |> function
                 | Some v -> V.decode v 0
-                | None -> raise Not_found)) 
+                | None -> raise Not_found)
         t.index
     in
+    (* slow_down_if_merging t; *)
     Semaphore.with_acquire "find_instance" t.rename_lock @@ fun () ->
     match find_log_async () with
     | e -> e
@@ -807,7 +830,10 @@ struct
     (* FIXME check this isn't too long... maybe perform in batches *)
     assert(t.index <> None); (* FIXME *)
     let index = Option.get t.index in
-    with_index index (fun ~rw ~ro:_ -> Kv.batch rw ops);
+    let t1 = Unix.time () in
+    with_index_rw index (fun ~rw -> Kv.batch rw ops);
+    let t2 = Unix.time () in
+    Printf.printf "Merge took %f\n%!" (t2 -. t1);
     (* NOTE following copied from previous code, without much
        understanding FIXME *)
     let before_rename_lock = Clock.counter () in
@@ -1079,16 +1105,6 @@ struct
   let merge t = ignore (try_merge_aux ?hook:None ~force:true t : _ async)
   let try_merge t = ignore (try_merge_aux ?hook:None ~force:false t : _ async)
 
-  let instance_is_merging t =
-    (* [merge_lock] is used to detect an ongoing merge. Other operations can
-       take this lock, but as they are not async, we consider this to be a good
-       enough approximation. *)
-    Semaphore.is_held t.merge_lock
-
-  let is_merging t =
-    let t = check_open t in
-    if t.config.readonly then raise RO_not_allowed;
-    instance_is_merging t
 
   (** {1 Replace} *)
 
@@ -1099,6 +1115,7 @@ struct
         l "[%s] replace %a %a" (Filename.basename t.root) pp_key key pp_value
           value);
     if t.config.readonly then raise RO_not_allowed;
+    slow_down_if_merging t;
     let log_limit_reached =
       Semaphore.with_acquire "replace" t.rename_lock (fun () ->
           let log =
