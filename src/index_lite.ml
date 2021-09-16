@@ -19,7 +19,7 @@
 
 (** Version of index using SQLite for the backend data store. *)
 
-module Kv = Kv_lite.Kyoto_impl
+module Kv = Kv_lite.Kv_hash_impl (* Kyoto_impl *)
 module Thread0 = Thread
 
 include Index_intf
@@ -823,20 +823,23 @@ struct
     trace "unsafe_perform_merge 2";
     log.mem |> Tbl.to_seq |> List.of_seq |> fun kvs -> 
     trace "unsafe_perform_merge 3";
-    (* let ops = List.rev_map (fun (k,v) -> (K.encode k, `Insert(V.encode v))) kvs in *)
+    (* NOTE comment this for KC, where we don't batch *)
+    let ops = List.rev_map (fun (k,v) -> (K.encode k, `Insert(V.encode v))) kvs in
     trace "unsafe_perform_merge 4";
     Printf.printf "Merging %d entries\n%!" (List.length kvs);
     (* FIXME check this isn't too long... maybe perform in batches *)
     assert(t.index <> None); (* FIXME *)
     let index = Option.get t.index in
     let t1 = Unix.time () in
-    (* with_index_rw index (fun ~rw -> Kv.batch rw ops); *)
+    with_index_rw index (fun ~rw -> Kv.batch rw ops);
+(* This is only for KC, since KC doesn't have batch ops, but we want to have yield
     let c = ref 1 in
     with_index_rw index (fun ~rw -> 
         kvs |> List.iter (fun (k,v) -> 
             Kv.slow_insert rw (K.encode k) (V.encode v); 
             incr c;
             if (!c mod 1000 = 0) then Thread.yield () else ()));
+*)
     let t2 = Unix.time () in
     Printf.printf "Merge took %f\n%!" (t2 -. t1);
     (* NOTE following copied from previous code, without much
