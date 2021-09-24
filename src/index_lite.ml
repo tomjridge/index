@@ -19,7 +19,7 @@
 
 (** Version of index using SQLite for the backend data store. *)
 
-module Kv = Kv_lite.Kv_hash_impl (* Kyoto_impl *)
+module Kv = Kv_lite.Btree_impl (* Kyoto_impl *)
 module Thread0 = Thread
 
 include Index_intf
