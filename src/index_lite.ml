@@ -20,8 +20,10 @@
 (** Version of index using SQLite for the backend data store. *)
 
 (* module Kv = Kv_lite.Kv_hash_impl (\* Kyoto_impl *\) *)
-module Kv' = Kv_lite.Btree_impl (* Kyoto_impl *)
-module Kv = Kv_lite.Hashtbl_impl.Wrap(Kv')
+(* module Kv' = Kv_lite.Btree_impl (\* Kyoto_impl *\) *)
+(* module Kv = Kv_lite.Hashtbl_impl.Wrap(Kv') *)
+module Kv = Kv_lite.Lmdb_impl
+
 
 module Thread0 = Thread
 
