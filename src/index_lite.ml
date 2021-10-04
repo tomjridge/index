@@ -24,7 +24,8 @@
 (* module Kv = Kv_lite.Hashtbl_impl.Wrap(Kv') *)
 (* module Kv = Kv' *)
 
-module Kv = Kv_lite.Kv_hash_impl
+(* module Kv = Kv_lite.Kv_hash_impl *)
+module Kv = Kv_lite.Rocksdb_impl
 
 module Thread0 = Thread
 
