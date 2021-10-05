@@ -26,6 +26,7 @@
 
 (* module Kv = Kv_lite.Kv_hash_impl *)
 module Kv = Kv_lite.Rocksdb_impl
+let _ = Printf.printf "Using RocksDB implementation\n%!"
 
 module Thread0 = Thread
 
