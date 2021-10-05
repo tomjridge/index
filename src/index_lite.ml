@@ -25,6 +25,7 @@
 (* module Kv = Kv' *)
 
 module Kv = Kv_lite.Kv_hash_impl
+let _ = Printf.printf "Using kv-hash implementation\n%!"
 
 module Thread0 = Thread
 
