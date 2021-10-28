@@ -33,3 +33,10 @@ let pwrite : fd:_ -> fd_offset:int63 -> _ =
         pwrite_int64 fd
           (Int63.Boxed.to_int64 fd_offset)
           buffer buffer_offset length
+
+external openfile_unbuffered :
+  string -> Unix.open_flag list -> int -> Unix.file_descr
+  = "stub_openfile_direct"
+
+let openfile_unbuffered name flags perm = openfile_unbuffered name flags perm
+let openfile_buffered name flags perm = Unix.openfile name flags perm

@@ -22,3 +22,8 @@ val pwrite :
     [buffer_offset]) to the file descriptor [fd] (starting at position
     [fd_offset]). Returns the number of bytes actually written. [fd]'s cursor
     position is unchanged. *)
+
+val openfile_unbuffered :
+  string -> Unix.open_flag list -> int -> Unix.file_descr
+
+val openfile_buffered : string -> Unix.open_flag list -> int -> Unix.file_descr

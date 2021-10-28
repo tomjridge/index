@@ -182,7 +182,7 @@ module IO : Index.Platform.IO = struct
     (aux [@tailcall]) dirname (fun () -> ())
 
   let raw_file ~flags ~version ~offset ~generation file =
-    let x = Unix.openfile file flags 0o644 in
+    let x = Syscalls.openfile_unbuffered file flags 0o644 in
     let raw = Raw.v x in
     let header = { Raw.Header.offset; version; generation } in
     Log.debug (fun m ->
@@ -245,13 +245,21 @@ module IO : Index.Platform.IO = struct
     in
     match Sys.file_exists file with
     | false ->
-        let x = Unix.openfile file Unix.[ O_CREAT; O_CLOEXEC; O_RDWR ] 0o644 in
+        let x =
+          Syscalls.openfile_unbuffered file
+            Unix.[ O_CREAT; O_CLOEXEC; O_RDWR ]
+            0o644
+        in
         let raw = Raw.v x in
         Raw.Header.set raw header;
         Raw.Fan.set_size raw fan_size;
         v ~fan_size ~offset:Int63.zero raw
     | true ->
-        let x = Unix.openfile file Unix.[ O_EXCL; O_CLOEXEC; O_RDWR ] 0o644 in
+        let x =
+          Syscalls.openfile_unbuffered file
+            Unix.[ O_EXCL; O_CLOEXEC; O_RDWR ]
+            0o644
+        in
         let raw = Raw.v x in
         if fresh then (
           Raw.Header.set raw header;
@@ -272,7 +280,11 @@ module IO : Index.Platform.IO = struct
     let v = v_instance ~readonly:true file in
     mkdir (Filename.dirname file);
     try
-      let x = Unix.openfile file Unix.[ O_EXCL; O_CLOEXEC; O_RDONLY ] 0o644 in
+      let x =
+        Syscalls.openfile_unbuffered file
+          Unix.[ O_EXCL; O_CLOEXEC; O_RDONLY ]
+          0o644
+      in
       let raw = Raw.v x in
       try
         let version = Raw.Version.get raw in
@@ -288,7 +300,8 @@ module IO : Index.Platform.IO = struct
         Raw.close raw;
         Error `No_file_on_disk
     with
-    | Unix.Unix_error (Unix.ENOENT, _, _) ->
+    | Unix.Unix_error (Unix.ENOENT, _, _) | Unix.Unix_error (Unix.EBADF, _, _)
+      ->
         (* The readonly instance cannot open a non existing file. *)
         Error `No_file_on_disk
     | e -> raise e

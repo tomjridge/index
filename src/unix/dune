@@ -1,7 +1,7 @@
 (library
  (foreign_stubs
   (language c)
-  (names pread pwrite))
+  (names pread pwrite odirect_stubs))
  (public_name index.unix)
  (name index_unix)
  (libraries fmt index logs logs.threaded threads.posix unix semaphore-compat
