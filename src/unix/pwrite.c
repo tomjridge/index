@@ -18,7 +18,7 @@ CAMLprim value caml_index_pwrite_int
   size_t numbytes = (len > UNIX_BUFFER_SIZE) ? UNIX_BUFFER_SIZE : len;
   ret = pwrite(fd, &Byte(v_buf, buf_off), numbytes, fd_off);
 
-  if (ret == -1) uerror("write", Nothing);
+  if (ret == -1) uerror("pwrite_int", Nothing);
 
   CAMLreturn(Val_long(ret));
 }
@@ -37,7 +37,7 @@ CAMLprim value caml_index_pwrite_int64
   size_t numbytes = (len > UNIX_BUFFER_SIZE) ? UNIX_BUFFER_SIZE : len;
   ret = pwrite(fd, &Byte(v_buf, buf_off), numbytes, fd_off);
 
-  if (ret == -1) uerror("write", Nothing);
+  if (ret == -1) uerror("pwrite_int64", Nothing);
 
   CAMLreturn(Val_long(ret));
 }

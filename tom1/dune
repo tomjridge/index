@@ -1,0 +1,3 @@
+(executable 
+  (name tom1)
+  (libraries index index.unix optint))
