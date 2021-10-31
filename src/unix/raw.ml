@@ -9,8 +9,17 @@ type t = {
   file : string;
 }
 
+let fadvise_ fd =
+  (* if len is 0, it means "the whole file" on Linux *)
+  ExtUnix.Specific.(fadvise fd 0 0 (*len*) POSIX_FADV_RANDOM);
+  ExtUnix.Specific.(fadvise fd 0 0 (*len*) POSIX_FADV_DONTNEED);
+  (* POSIX_FADV_NOREUSE also an option, but strictly speaking it
+     doesn't fit our usecase *)
+  ()
+
 let v fd file =
   let pread_timer = Mtime.Span.zero in
+  fadvise_ fd;
   { fd; file; pread_timer }
 
 let really_write fd fd_offset buffer buffer_offset length =
