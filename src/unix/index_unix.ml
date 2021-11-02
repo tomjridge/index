@@ -183,7 +183,7 @@ module IO : Index.Platform.IO = struct
 
   let raw_file ~flags ~version ~offset ~generation file =
     let x = Unix.openfile file flags 0o644 in
-    let raw = Raw.v x in
+    let raw = Raw.v x file in
     let header = { Raw.Header.offset; version; generation } in
     Log.debug (fun m ->
         m "[%s] raw set_header %a" file Header.pp { offset; generation });
@@ -246,13 +246,13 @@ module IO : Index.Platform.IO = struct
     match Sys.file_exists file with
     | false ->
         let x = Unix.openfile file Unix.[ O_CREAT; O_CLOEXEC; O_RDWR ] 0o644 in
-        let raw = Raw.v x in
+        let raw = Raw.v x file in
         Raw.Header.set raw header;
         Raw.Fan.set_size raw fan_size;
         v ~fan_size ~offset:Int63.zero raw
     | true ->
         let x = Unix.openfile file Unix.[ O_EXCL; O_CLOEXEC; O_RDWR ] 0o644 in
-        let raw = Raw.v x in
+        let raw = Raw.v x file in
         if fresh then (
           Raw.Header.set raw header;
           Raw.Fan.set_size raw fan_size;
@@ -273,7 +273,7 @@ module IO : Index.Platform.IO = struct
     mkdir (Filename.dirname file);
     try
       let x = Unix.openfile file Unix.[ O_EXCL; O_CLOEXEC; O_RDONLY ] 0o644 in
-      let raw = Raw.v x in
+      let raw = Raw.v x file in
       try
         let version = Raw.Version.get raw in
         if version <> current_version then

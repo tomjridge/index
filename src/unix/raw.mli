@@ -13,7 +13,7 @@ open! Import
 type t
 (** The type of [raw] file handles. *)
 
-val v : Unix.file_descr -> t
+val v : Unix.file_descr -> string -> t
 (** Construct a [raw] value from a file descriptor. *)
 
 val unsafe_write : t -> off:int63 -> string -> int -> int -> unit
