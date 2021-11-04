@@ -3,9 +3,24 @@ module Stats = Index.Stats
 
 let ( ++ ) = Int63.add
 
-type t = { fd : Unix.file_descr } [@@unboxed]
+type t = {
+  fd : Unix.file_descr;
+  mutable pread_timer : Mtime.Span.t;
+  file : string;
+}
 
-let v fd = { fd }
+let fadvise_ fd =
+  (* if len is 0, it means "the whole file" on Linux *)
+  ExtUnix.Specific.(fadvise fd 0 0 (*len*) POSIX_FADV_RANDOM);
+  ExtUnix.Specific.(fadvise fd 0 0 (*len*) POSIX_FADV_DONTNEED);
+  (* POSIX_FADV_NOREUSE also an option, but strictly speaking it
+     doesn't fit our usecase *)
+  ()
+
+let v fd file =
+  let pread_timer = Mtime.Span.zero in
+  fadvise_ fd;
+  { fd; file; pread_timer }
 
 let really_write fd fd_offset buffer buffer_offset length =
   let rec aux fd_offset buffer_offset length =
@@ -31,7 +46,12 @@ let really_read fd fd_offset length buffer =
   aux fd_offset 0 length
 
 let fsync t = Unix.fsync t.fd
-let close t = Unix.close t.fd
+
+let close t =
+  Fmt.epr "file = %s pread_timer = %f\n%!" t.file
+    (Mtime.Span.to_ms t.pread_timer);
+  Unix.close t.fd
+
 let fstat t = Unix.fstat t.fd
 
 let unsafe_write t ~off buffer buffer_offset length =
@@ -39,9 +59,16 @@ let unsafe_write t ~off buffer buffer_offset length =
   really_write t.fd off buffer buffer_offset length;
   Stats.add_write length
 
-let unsafe_read t ~off ~len buf =
+let unsafe_read' t ~off ~len buf =
   let n = really_read t.fd off len buf in
   Stats.add_read n;
+  n
+
+let unsafe_read t ~off ~len buf =
+  let timer = Mtime_clock.counter () in
+  let n = unsafe_read' t ~off ~len buf in
+  let span = Mtime_clock.count timer in
+  t.pread_timer <- Mtime.Span.add t.pread_timer span;
   n
 
 let encode_int63 n =
