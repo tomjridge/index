@@ -1054,6 +1054,7 @@ let () =
   Common.report ();
   Alcotest.run "index.unix"
     [
+      ("log_with_lru", Test_log_with_lru.tests);
       ("io_array", Io_array.tests);
       ("merge", Force_merge.tests);
       ("live", Live.tests);
