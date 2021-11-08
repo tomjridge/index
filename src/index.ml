@@ -122,7 +122,7 @@ struct
 
   type config = {
     log_size : int;  (** The log maximal size before triggering a [merge]. *)
-    lru_size : int;
+    lru_size : int;  (** The per-log lru (otherwise log finds go to disk) *)
     readonly : bool;
     fresh : bool;
         (** Whether the index was created from scratch, erasing existing data,

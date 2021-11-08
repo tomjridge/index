@@ -17,6 +17,10 @@ let random_string () = String.init String_size.length (fun _i -> random_char ())
 
 module Default = struct
   let log_size = 4
+
+  let lru_size = 1 
+  (* NOTE 0 is also possible, but 1 seems a good way to also test Lru behaviour *)
+
   let size = 103
 end
 
@@ -105,11 +109,11 @@ struct
 
   let ignore (_ : t) = ()
 
-  let empty_index ?(log_size = Default.log_size) ?flush_callback ?throttle () =
+  let empty_index ?(lru_size=Default.lru_size) ?(log_size = Default.log_size) ?flush_callback ?throttle () =
     let name = fresh_name "empty_index" in
     let cache = Index.empty_cache () in
     let rw =
-      Index.v ?flush_callback ?throttle ~cache ~fresh:true ~log_size name
+      Index.v ?flush_callback ?throttle ~cache ~fresh:true ~lru_size ~log_size name
     in
     let close_all = ref (fun () -> Index.close rw) in
     let tbl = Hashtbl.create 0 in
@@ -122,7 +126,7 @@ struct
     in
     { rw; tbl; clone; close_all = (fun () -> !close_all ()) }
 
-  let full_index ?(size = Default.size) ?(log_size = Default.log_size)
+  let full_index ?(size = Default.size) ?(lru_size=Default.lru_size) ?(log_size = Default.log_size)
       ?(flush_callback = fun () -> ()) ?throttle () =
     let f =
       (* Disable [flush_callback] while adding initial entries *)
@@ -133,7 +137,7 @@ struct
     let rw =
       Index.v
         ~flush_callback:(fun () -> !f ())
-        ?throttle ~cache ~fresh:true ~log_size name
+        ?throttle ~cache ~fresh:true ~lru_size ~log_size name
     in
     let close_all = ref (fun () -> Index.close rw) in
     let tbl = Hashtbl.create 0 in
@@ -148,7 +152,7 @@ struct
     f := flush_callback (* Enable [flush_callback] *);
     let clone ?(fresh = false) ~readonly () =
       let t =
-        Index.v ~flush_callback ?throttle ~cache ~fresh ~log_size ~readonly name
+        Index.v ~flush_callback ?throttle ~cache ~fresh ~lru_size ~log_size ~readonly name
       in
       (close_all := !close_all >> fun () -> Index.close t);
       t
