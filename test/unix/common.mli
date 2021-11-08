@@ -65,6 +65,7 @@ end) : sig
   (** [fresh_name typ] is a clean directory for a resource of type [typ]. *)
 
   val with_empty_index :
+    ?lru_size:int ->
     ?log_size:int ->
     ?flush_callback:(unit -> unit) ->
     ?throttle:[ `Overcommit_memory | `Block_writes ] ->
@@ -75,6 +76,7 @@ end) : sig
       index and any clones are closed. *)
 
   val with_full_index :
+    ?lru_size:int ->
     ?log_size:int ->
     ?flush_callback:(unit -> unit) ->
     ?throttle:[ `Overcommit_memory | `Block_writes ] ->

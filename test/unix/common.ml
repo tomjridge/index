@@ -164,11 +164,11 @@ struct
     t.close_all ();
     a
 
-  let with_empty_index ?log_size ?flush_callback ?throttle () f =
-    call_then_close (empty_index ?log_size ?flush_callback ?throttle ()) f
+  let with_empty_index ?lru_size ?log_size ?flush_callback ?throttle () f =
+    call_then_close (empty_index ?lru_size ?log_size ?flush_callback ?throttle ()) f
 
-  let with_full_index ?log_size ?flush_callback ?throttle ?size () f =
-    call_then_close (full_index ?log_size ?flush_callback ?throttle ?size ()) f
+  let with_full_index ?lru_size ?log_size ?flush_callback ?throttle ?size () f =
+    call_then_close (full_index ?lru_size ?log_size ?flush_callback ?throttle ?size ()) f
 end
 
 let ( let* ) f k = f k
