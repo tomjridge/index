@@ -21,27 +21,43 @@ let src = Logs.Src.create "index_unix" ~doc:"Index_unix"
 
 module Log = (val Logs.src_log src : Logs.LOG)
 
+(* RW only operations *)
 exception RO_not_allowed
 
+(* layered store will be diff version; irmin-pack IO code has support for 2 versions; header of file on disk *)
 let current_version = "00000001"
 
 module Stats = Index.Stats
+
+(* IO abstraction: most generic one, each file; trivial fan *)
+
+(* write data to end of file; adjust header; at the moment there is no fsync between these; never observed case that writes were out of order *)
 
 module IO : Index.Platform.IO = struct
   let ( ++ ) = Int63.add
   let ( -- ) = Int63.sub
 
+  (* buffer is mostly: performance batching the writes *)
+
   type t = {
-    mutable file : string;
-    mutable header : int63;
-    mutable raw : Raw.t;
-    mutable offset : int63;
-    mutable flushed : int63;
-    mutable fan_size : int63;
+    mutable file : string; (* filename *)
+    mutable header : int63; (* length of header; all offsets pushed by this amount *)
+    mutable raw : Raw.t;  (* fd; short reads and writes accounted for *)
+    mutable offset : int63; (* offset where we write new stuff; everything goes via buffer *)
+    mutable flushed : int63; (* guaranteed to be on disk *)
+    mutable fan_size : int63; (* fan size; only for the data file *)
     readonly : bool;
     buf : Buffer.t;
-    flush_callback : unit -> unit;
+    flush_callback : unit -> unit; (* do something before the flush; used by irmin-pack; want to write the pack before the index; so must be called  *)
   }
+
+  (* flush_callback: must be called before any adjustment of the index
+     offset; index has key,offset; pack has off,value; find goes via
+     index; if not found, ok; if in index, we must have the value in
+     pack file; so before something committed to index, must be in
+     pack; before any kv committed to index, we must call the
+     flush_callback *)
+
 
   let flush ?no_callback ?(with_fsync = false) t =
     if t.readonly then raise RO_not_allowed;
@@ -55,8 +71,9 @@ module IO : Index.Platform.IO = struct
       Raw.Offset.set t.raw offset;
       assert (t.flushed ++ Int63.of_int buf_len = t.header ++ offset);
       t.flushed <- offset ++ t.header);
-    if with_fsync then Raw.fsync t.raw
+    if with_fsync then Raw.fsync t.raw (* assumed that writes commit to disk in-order *)
 
+  (* this is when we rename the new data on the old data *)
   let rename ~src ~dst =
     flush ~with_fsync:true src;
     Raw.close dst.raw;
@@ -81,6 +98,9 @@ module IO : Index.Platform.IO = struct
     let len = Int63.of_int len in
     t.offset <- t.offset ++ len;
     if t.offset -- t.flushed > auto_flush_limit then flush t
+(* *)
+
+
 
   let append t buf = append_substring t buf ~off:0 ~len:(String.length buf)
 
@@ -126,6 +146,7 @@ module IO : Index.Platform.IO = struct
 
   let offset t = t.offset
 
+  (* generation: when we do a merge we rewrite the file, cleanup log files; RO needs to know when to reload *)
   let get_generation t =
     let i = Raw.Generation.get t.raw in
     Log.debug (fun m -> m "get_generation: %a" Int63.pp i);
@@ -181,6 +202,8 @@ module IO : Index.Platform.IO = struct
     in
     (aux [@tailcall]) dirname (fun () -> ())
 
+  (* get the raw file *)
+
   let raw_file ~flags ~version ~offset ~generation file =
     let x = Unix.openfile file flags 0o644 in
     let raw = Raw.v x in
@@ -192,15 +215,20 @@ module IO : Index.Platform.IO = struct
     Raw.fsync raw;
     raw
 
+  (* clear: used to set the offset beginning of file; now: close; remove; open a new one; must remove file on disk; layered store does GC, so important to remove file on disk *)
+
+(* hook is for testing *)
   let clear ~generation ?(hook = fun () -> ()) ~reopen t =
     t.offset <- Int63.zero;
     t.flushed <- t.header;
     Buffer.clear t.buf;
     let old = t.raw in
 
+
+
     if reopen then (
       (* Open a fresh file and rename it to ensure atomicity:
-         concurrent readers should never see the file disapearing. *)
+         concurrent readers should never see the file disapearing. This is important; NOT SURE ABOUT this PR #288 *)
       let tmp_file = t.file ^ "_tmp" in
       t.raw <-
         raw_file ~version:current_version ~generation ~offset:Int63.zero
@@ -214,12 +242,14 @@ module IO : Index.Platform.IO = struct
 
     hook ();
 
-    (* Set new generation in the old file. *)
+    (* Set new generation in the old file. NOTE this is in the old file; old file already unlinked; RO instance will reopen *)
     Raw.Header.set old
       { Raw.Header.offset = Int63.zero; generation; version = current_version };
     Raw.close old
 
   let () = assert (String.length current_version = 8)
+
+(* data file AND log file; readonly and rw! *)
 
   let v_instance ?(flush_callback = fun () -> ()) ~readonly ~fan_size ~offset
       file raw =
@@ -290,8 +320,15 @@ module IO : Index.Platform.IO = struct
     with
     | Unix.Unix_error (Unix.ENOENT, _, _) ->
         (* The readonly instance cannot open a non existing file. *)
-        Error `No_file_on_disk
+        Error `No_file_on_disk  (* can  bubble up to tezos-node?? *)
     | e -> raise e
+
+
+(* tezos code can withstand loss of upto the "current" commit; how does it check current commit made it? cycle is 4096 commits; perhaps it checks last 5 commits; or maybe something *)
+
+(* context is our irmin store; tezos store is an index between hashes and ... something? block hash; context hash; various things Co is context hash; bl block hash *)
+
+(* checks.ml sues raw size *)
 
   let exists = Sys.file_exists
   let size { raw; _ } = (Raw.fstat raw).st_size
@@ -302,6 +339,8 @@ module IO : Index.Platform.IO = struct
 
     exception Locked of string
 
+
+    (* locks are used to guarantee only one read/write process; guards against 2 tezos nodes on the same store; *)
     let unsafe_lock op f =
       mkdir (Filename.dirname f);
       let fd = Unix.openfile f [ Unix.O_CREAT; Unix.O_RDWR ] 0o600
